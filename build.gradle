@@ -1,0 +1,61 @@
+plugins {
+	id 'java'
+	id 'org.springframework.boot' version '3.5.7'
+	id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'kr.suhsaechan'
+version = '0.0.1'
+description = 'SUH-AI-MODULE'
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(21)
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	implementation 'org.springframework.boot:spring-boot-starter'
+	testImplementation 'org.springframework.boot:spring-boot-starter-test'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
+}
+
+bootJar { enabled = false }
+jar { enabled = true }
+
+publishing {
+	publications {
+		mavenJava(MavenPublication) {
+			from components.java
+			pom {
+				name = 'suh-ai-module'
+				description = '서새찬 AI 서버 통신 라이브러리'
+				url = 'https://github.com/Cassiiopeia/suh-ai-module/'
+			}
+		}
+	}
+	repositories {
+		mavenLocal()
+		maven {
+			name = 'nexus'
+			url = uri(
+					version.endsWith('SNAPSHOT')
+							? "https://nexus.suhsaechan.kr/repository/maven-snapshots/"
+							: "https://nexus.suhsaechan.kr/repository/maven-releases/"
+			)
+			allowInsecureProtocol = true
+			credentials {
+				username = project.findProperty('nexusUsername')
+				password = project.findProperty('nexusPassword')
+			}
+		}
+	}
+}
