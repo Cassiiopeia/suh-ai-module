@@ -17,6 +17,7 @@ Ollama AI 서버와 간편하게 통신할 수 있는 Spring Boot 라이브러�
 - [빠른 시작](#빠른-시작)
 - [설정](#설정)
 - [사용 예제](#사용-예제)
+- [JSON Schema 가이드](docs/JSON_SCHEMA_GUIDE.md) (v0.0.8+) ⭐
 - [API 레퍼런스](#api-레퍼런스)
 - [테스트](#테스트)
 - [라이선스](#라이선스)
@@ -30,6 +31,7 @@ Ollama AI 서버와 간편하게 통신할 수 있는 Spring Boot 라이브러�
 ### 특징
 - ✅ **Auto-Configuration**: Spring Boot 자동 설정 지원
 - ✅ **간편한 API**: 직관적인 메서드로 AI 서버 통신
+- ✅ **JSON 응답 강제** (v0.0.8+): JSON Schema 기반 구조화된 응답 보장
 - ✅ **OkHttp 기반**: 안정적이고 효율적인 HTTP 통신
 - ✅ **타입 안전**: 완벽한 Java 타입 지원
 - ✅ **예외 처리**: 명확한 에러 코드 및 메시지
@@ -43,6 +45,7 @@ Ollama AI 서버와 간편하게 통신할 수 있는 Spring Boot 라이브러�
 | **Health Check** | Ollama 서버 상태 확인 |
 | **모델 목록 조회** | 설치된 AI 모델 목록 가져오기 |
 | **텍스트 생성 (Generate)** | AI 프롬프트로 텍스트 생성 |
+| **JSON 응답 강제** (v0.0.8+) | JSON Schema로 구조화된 응답 보장 |
 | **간편 API** | 한 줄로 AI 응답 받기 |
 
 ---
@@ -206,7 +209,39 @@ System.out.println("응답: " + response.getResponse());
 System.out.println("처리 시간: " + response.getTotalDuration() / 1_000_000 + " ms");
 ```
 
-### 5. 예외 처리
+### 5. JSON 응답 강제
+
+**간단한 사용법**:
+```java
+OllamaRequest request = OllamaRequest.builder()
+    .model("gemma3:4b")
+    .prompt("Extract name and age from: John Doe, 30 years old")
+    .responseSchema(JsonSchema.of("name", "string", "age", "integer"))
+    .build();
+
+OllamaResponse response = ollamaService.generate(request);
+String json = response.getResponse();  // { "name": "John Doe", "age": 30 }
+```
+
+**전역 설정** (@Bean 방식):
+```java
+@Configuration
+public class AiConfig {
+    @Bean
+    public OllamaServiceCustomizer ollamaCustomizer() {
+        return OllamaServiceCustomizer.builder()
+            .defaultResponseSchema(JsonSchema.of(
+                "result", "string",
+                "success", "boolean"
+            ))
+            .build();
+    }
+}
+```
+
+**📚 상세 가이드**: [JSON Schema 사용 가이드](docs/JSON_SCHEMA_GUIDE.md)
+
+### 6. 예외 처리
 
 ```java
 try {
@@ -272,7 +307,26 @@ OllamaRequest.builder()
     .model("gemma3:4b")      // 모델명 (필수)
     .prompt("Your prompt")   // 프롬프트 (필수)
     .stream(false)           // 스트리밍 모드 (기본: false)
+    .responseSchema(schema)  // JSON 응답 강제
     .build();
+```
+
+#### `JsonSchema` (v0.0.8+)
+```java
+// 방법 1: 간단한 스키마
+JsonSchema.of("name", "string", "age", "integer")
+
+// 방법 2: 빌더 패턴
+JsonSchema.builder()
+    .property("name", "string")
+    .property("age", "integer")
+    .required("name")
+    .build()
+
+// 방법 3: 중첩 객체
+JsonSchema.builder()
+    .property("user", JsonSchema.object("name", "string", "age", "integer"))
+    .build()
 ```
 
 #### `OllamaResponse`
