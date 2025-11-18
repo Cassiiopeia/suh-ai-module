@@ -4,14 +4,14 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * Ollama AI 서버 연동을 위한 설정 프로퍼티
+ * SUH-AIDER AI 서버 연동을 위한 설정 프로퍼티
  */
 @Data
-@ConfigurationProperties(prefix = "suh.ai")
-public class OllamaProperties {
+@ConfigurationProperties(prefix = "suh.aider")
+public class SuhAiderConfig {
 
     /**
-     * Ollama 서버 기본 URL
+     * AI 서버 기본 URL
      * 기본값: https://ai.suhsaechan.kr
      */
     private String baseUrl = "https://ai.suhsaechan.kr";
