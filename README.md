@@ -17,7 +17,7 @@ AI 서버와 간편하게 통신할 수 있는 Spring Boot 라이브러리입니
 - [빠른 시작](#빠른-시작)
 - [설정](#설정)
 - [사용 예제](#사용-예제)
-- [JSON Schema 가이드](docs/JSON_SCHEMA_GUIDE.md) (v0.0.8+) ⭐
+- [JSON Schema 가이드](docs/JSON_SCHEMA_GUIDE.md)
 - [API 레퍼런스](#api-레퍼런스)
 - [테스트](#테스트)
 - [라이선스](#라이선스)
@@ -31,7 +31,8 @@ AI 서버와 간편하게 통신할 수 있는 Spring Boot 라이브러리입니
 ### 특징
 - ✅ **Auto-Configuration**: Spring Boot 자동 설정 지원
 - ✅ **간편한 API**: 직관적인 메서드로 AI 서버 통신
-- ✅ **JSON 응답 강제** (v0.0.8+): JSON Schema 기반 구조화된 응답 보장
+- ✅ **스트리밍 응답**: GPT처럼 실시간 토큰 단위 응답
+- ✅ **JSON 응답 강제**: JSON Schema 기반 구조화된 응답 보장
 - ✅ **OkHttp 기반**: 안정적이고 효율적인 HTTP 통신
 - ✅ **타입 안전**: 완벽한 Java 타입 지원
 - ✅ **예외 처리**: 명확한 에러 코드 및 메시지
@@ -45,7 +46,8 @@ AI 서버와 간편하게 통신할 수 있는 Spring Boot 라이브러리입니
 | **Health Check** | AI 서버 상태 확인 |
 | **모델 목록 조회** | 설치된 AI 모델 목록 가져오기 |
 | **텍스트 생성 (Generate)** | AI 프롬프트로 텍스트 생성 |
-| **JSON 응답 강제** (v0.0.8+) | JSON Schema로 구조화된 응답 보장 |
+| **스트리밍 응답** | GPT처럼 실시간 토큰 단위 응답 표시 |
+| **JSON 응답 강제** | JSON Schema로 구조화된 응답 보장 |
 | **간편 API** | 한 줄로 AI 응답 받기 |
 
 ---
@@ -291,7 +293,64 @@ public class AiConfig {
 
 **📚 상세 가이드**: [JSON Schema 사용 가이드](docs/JSON_SCHEMA_GUIDE.md)
 
-### 6. 예외 처리
+### 6. 스트리밍 응답
+
+ChatGPT, Claude처럼 AI가 토큰을 생성할 때마다 실시간으로 응답을 받을 수 있습니다.
+
+**기본 사용법**:
+```java
+suhAiderEngine.generateStream("gemma3:4b", "안녕하세요!", new StreamCallback() {
+    @Override
+    public void onNext(String chunk) {
+        System.out.print(chunk);  // 토큰 단위로 실시간 출력
+    }
+
+    @Override
+    public void onComplete() {
+        System.out.println("\n완료!");
+    }
+
+    @Override
+    public void onError(Throwable error) {
+        System.err.println("에러: " + error.getMessage());
+    }
+});
+```
+
+**Spring MVC + SSE (Server-Sent Events)**:
+```java
+@GetMapping(value = "/ai/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+public SseEmitter streamGenerate(@RequestParam String prompt) {
+    SseEmitter emitter = new SseEmitter(Long.MAX_VALUE);
+
+    suhAiderEngine.generateStreamAsync("gemma3:4b", prompt, new StreamCallback() {
+        @Override
+        public void onNext(String chunk) {
+            try {
+                emitter.send(SseEmitter.event().data(chunk));
+            } catch (IOException e) {
+                emitter.completeWithError(e);
+            }
+        }
+
+        @Override
+        public void onComplete() {
+            emitter.complete();
+        }
+
+        @Override
+        public void onError(Throwable error) {
+            emitter.completeWithError(error);
+        }
+    });
+
+    return emitter;
+}
+```
+
+> **주의**: 스트리밍 모드에서는 `responseSchema`가 지원되지 않습니다. JSON 형식 응답이 필요하면 `generate()` 메서드를 사용하세요.
+
+### 7. 예외 처리
 
 ```java
 try {
@@ -349,6 +408,35 @@ AI 텍스트를 생성합니다 (간편 버전).
 **반환값**: 생성된 텍스트 (`String`)
 **예외**: `SuhAiderException`
 
+#### `void generateStream(SuhAiderRequest request, StreamCallback callback)`
+AI 텍스트를 스트리밍으로 생성합니다. 토큰이 생성될 때마다 콜백이 호출됩니다.
+
+**파라미터**:
+- `request`: `SuhAiderRequest` (model, prompt 필수)
+- `callback`: `StreamCallback` (onNext, onComplete, onError)
+
+> **주의**: 스트리밍 모드에서는 `responseSchema`가 무시됩니다.
+
+#### `void generateStream(String model, String prompt, StreamCallback callback)`
+스트리밍 생성 (간편 버전).
+
+**파라미터**:
+- `model`: 모델명 (예: `"gemma3:4b"`)
+- `prompt`: 프롬프트 텍스트
+- `callback`: 스트리밍 콜백
+
+#### `CompletableFuture<Void> generateStreamAsync(SuhAiderRequest request, StreamCallback callback)`
+비동기 스트리밍. 백그라운드 스레드에서 실행되며 Spring MVC의 `SseEmitter`와 함께 사용할 때 유용합니다.
+
+**파라미터**:
+- `request`: `SuhAiderRequest` (model, prompt 필수)
+- `callback`: 스트리밍 콜백
+
+**반환값**: `CompletableFuture<Void>` (완료 시점 추적용)
+
+#### `CompletableFuture<Void> generateStreamAsync(String model, String prompt, StreamCallback callback)`
+비동기 스트리밍 (간편 버전).
+
 ### DTO 클래스
 
 #### `SuhAiderRequest`
@@ -393,6 +481,15 @@ JsonSchema.builder()
 | `name` | `String` | 모델 이름 |
 | `size` | `Long` | 모델 크기 (바이트) |
 | `modifiedAt` | `String` | 수정 일시 |
+
+#### `StreamCallback`
+스트리밍 응답을 처리하기 위한 콜백 인터페이스입니다.
+
+| 메서드 | 설명 |
+|--------|------|
+| `onNext(String chunk)` | 토큰이 생성될 때마다 호출됩니다 |
+| `onComplete()` | 응답 생성이 완료되면 호출됩니다 |
+| `onError(Throwable error)` | 에러 발생 시 호출됩니다 |
 
 ### 예외 (SuhAiderException)
 
