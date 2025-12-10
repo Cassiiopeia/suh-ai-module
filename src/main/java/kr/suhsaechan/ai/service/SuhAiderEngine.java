@@ -1,6 +1,7 @@
 package kr.suhsaechan.ai.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import kr.suhsaechan.ai.config.SuhAiderConfig;
 import kr.suhsaechan.ai.config.SuhAiderCustomizer;
@@ -18,6 +19,8 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
+import okhttp3.ResponseBody;
+import okio.BufferedSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.lang.Nullable;
@@ -27,6 +30,7 @@ import org.springframework.util.StringUtils;
 import jakarta.annotation.PostConstruct;
 import java.io.IOException;
 import java.net.SocketTimeoutException;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * SUH-AIDER AI 서버와 통신하는 엔진
@@ -34,6 +38,7 @@ import java.net.SocketTimeoutException;
  * 1. Health Check
  * 2. 모델 목록 조회
  * 3. Generate API (프롬프트 → 응답 생성)
+ * 4. Generate Stream API (스트리밍 응답)
  */
 @Service
 @Slf4j
@@ -293,6 +298,223 @@ public class SuhAiderEngine {
     }
 
     /**
+     * AI 텍스트 생성 (스트리밍)
+     * POST /api/generate (stream: true)
+     *
+     * <p>AI가 토큰을 생성할 때마다 실시간으로 콜백이 호출됩니다.
+     * ChatGPT, Claude처럼 한 글자씩 표시되는 효과를 구현할 때 사용합니다.</p>
+     *
+     * <p><b>주의사항:</b> 스트리밍 모드에서는 {@code responseSchema}를 지원하지 않습니다.
+     * 이유: 부분 텍스트만 받기 때문에 JSON 정제가 불가능하고, 실시간 표시 목적과 충돌합니다.
+     * JSON 형식 응답이 필요하면 {@link #generate(SuhAiderRequest)} 메서드를 사용하세요.</p>
+     *
+     * <p>사용 예제:</p>
+     * <pre>
+     * suhAiderEngine.generateStream(request, new StreamCallback() {
+     *     &#64;Override
+     *     public void onNext(String chunk) {
+     *         System.out.print(chunk);  // 실시간 출력
+     *     }
+     *
+     *     &#64;Override
+     *     public void onComplete() {
+     *         System.out.println("\n완료!");
+     *     }
+     *
+     *     &#64;Override
+     *     public void onError(Throwable error) {
+     *         System.err.println("에러: " + error.getMessage());
+     *     }
+     * });
+     * </pre>
+     *
+     * @param request SuhAiderRequest (model, prompt 필수, responseSchema는 무시됨)
+     * @param callback 스트리밍 콜백 (onNext, onComplete, onError)
+     */
+    public void generateStream(SuhAiderRequest request, StreamCallback callback) {
+        log.debug("Generate Stream 호출 - 모델: {}, 프롬프트 길이: {}",
+                request.getModel(),
+                request.getPrompt() != null ? request.getPrompt().length() : 0);
+
+        // 파라미터 검증
+        if (!StringUtils.hasText(request.getModel())) {
+            callback.onError(new SuhAiderException(SuhAiderErrorCode.INVALID_PARAMETER, "모델명이 비어있습니다"));
+            return;
+        }
+        if (!StringUtils.hasText(request.getPrompt())) {
+            callback.onError(new SuhAiderException(SuhAiderErrorCode.INVALID_PARAMETER, "프롬프트가 비어있습니다"));
+            return;
+        }
+
+        // ⚠️ 스트리밍 모드에서는 responseSchema를 지원하지 않습니다
+        // 이유: 부분 텍스트만 받기 때문에 JSON 정제가 불가능하고, 실시간 표시 목적과 충돌합니다.
+        if (request.getResponseSchema() != null) {
+            log.warn("스트리밍 모드에서는 responseSchema가 무시됩니다. " +
+                    "JSON 형식 응답이 필요하면 generate() 메서드를 사용하세요.");
+        }
+        if (customizer != null && customizer.getDefaultResponseSchema() != null) {
+            log.warn("전역 기본 responseSchema가 설정되어 있지만, 스트리밍 모드에서는 무시됩니다.");
+        }
+
+        // 원본 프롬프트 그대로 사용 (증강하지 않음)
+        String finalPrompt = request.getPrompt();
+
+        // stream: true 강제 설정
+        SuhAiderRequest streamRequest = request.toBuilder()
+                .prompt(finalPrompt)
+                .stream(true)
+                .responseSchema(null)
+                .build();
+
+        String url = config.getBaseUrl() + "/api/generate";
+
+        try {
+            String jsonPayload = objectMapper.writeValueAsString(streamRequest);
+            log.debug("Generate Stream 요청 페이로드: {}", jsonPayload);
+
+            RequestBody body = RequestBody.create(
+                    jsonPayload,
+                    MediaType.parse("application/json; charset=utf-8")
+            );
+
+            Request httpRequest = addSecurityHeader(new Request.Builder())
+                    .url(url)
+                    .addHeader("Content-Type", "application/json")
+                    .post(body)
+                    .build();
+
+            try (Response response = httpClient.newCall(httpRequest).execute()) {
+                if (!response.isSuccessful()) {
+                    String responseBody = response.body() != null ? response.body().string() : "";
+                    log.error("Generate Stream 실패 - HTTP {}: {}", response.code(), responseBody);
+                    handleHttpErrorForCallback(response.code(), responseBody, callback);
+                    return;
+                }
+
+                ResponseBody responseBody = response.body();
+                if (responseBody == null) {
+                    callback.onError(new SuhAiderException(SuhAiderErrorCode.EMPTY_RESPONSE));
+                    return;
+                }
+
+                // 스트림 처리
+                BufferedSource source = responseBody.source();
+
+                while (!source.exhausted()) {
+                    String line = source.readUtf8Line();
+
+                    if (line == null || line.trim().isEmpty()) {
+                        continue;
+                    }
+
+                    try {
+                        JsonNode node = objectMapper.readTree(line);
+                        String chunk = node.has("response") ? node.get("response").asText("") : "";
+
+                        if (!chunk.isEmpty()) {
+                            callback.onNext(chunk);
+                        }
+
+                        if (node.has("done") && node.get("done").asBoolean(false)) {
+                            log.info("Generate Stream 완료");
+                            callback.onComplete();
+                            break;
+                        }
+
+                    } catch (JsonProcessingException e) {
+                        log.warn("청크 파싱 실패 (건너뜀): {}", line);
+                        // 파싱 실패해도 계속 진행
+                    }
+                }
+            }
+
+        } catch (SocketTimeoutException e) {
+            log.error("Generate Stream 타임아웃: {}", e.getMessage());
+            callback.onError(new SuhAiderException(SuhAiderErrorCode.READ_TIMEOUT, e));
+        } catch (JsonProcessingException e) {
+            log.error("JSON 처리 실패: {}", e.getMessage());
+            callback.onError(new SuhAiderException(SuhAiderErrorCode.JSON_PARSE_ERROR, e));
+        } catch (IOException e) {
+            log.error("Generate Stream 네트워크 오류: {}", e.getMessage());
+            callback.onError(new SuhAiderException(SuhAiderErrorCode.NETWORK_ERROR, e));
+        }
+    }
+
+    /**
+     * 간편 스트리밍 메서드
+     * 모델명과 프롬프트만으로 스트리밍 응답을 받을 수 있습니다.
+     *
+     * @param model 모델명 (예: "llama2", "mistral")
+     * @param prompt 프롬프트 텍스트
+     * @param callback 스트리밍 콜백
+     */
+    public void generateStream(String model, String prompt, StreamCallback callback) {
+        SuhAiderRequest request = SuhAiderRequest.builder()
+                .model(model)
+                .prompt(prompt)
+                .stream(true)
+                .build();
+
+        generateStream(request, callback);
+    }
+
+    /**
+     * 비동기 스트리밍 메서드
+     * 백그라운드 스레드에서 스트리밍을 처리합니다.
+     * Spring MVC의 SseEmitter와 함께 사용할 때 유용합니다.
+     *
+     * <p>사용 예제 (Spring MVC + SseEmitter):</p>
+     * <pre>
+     * &#64;GetMapping(value = "/ai/stream", produces = TEXT_EVENT_STREAM_VALUE)
+     * public SseEmitter streamGenerate(&#64;RequestParam String prompt) {
+     *     SseEmitter emitter = new SseEmitter(Long.MAX_VALUE);
+     *
+     *     suhAiderEngine.generateStreamAsync(request, new StreamCallback() {
+     *         &#64;Override
+     *         public void onNext(String chunk) {
+     *             try {
+     *                 emitter.send(SseEmitter.event().data(chunk));
+     *             } catch (IOException e) {
+     *                 emitter.completeWithError(e);
+     *             }
+     *         }
+     *
+     *         &#64;Override
+     *         public void onComplete() {
+     *             emitter.complete();
+     *         }
+     *
+     *         &#64;Override
+     *         public void onError(Throwable error) {
+     *             emitter.completeWithError(error);
+     *         }
+     *     });
+     *
+     *     return emitter;
+     * }
+     * </pre>
+     *
+     * @param request SuhAiderRequest (model, prompt 필수)
+     * @param callback 스트리밍 콜백
+     * @return CompletableFuture (완료 시점 추적용)
+     */
+    public CompletableFuture<Void> generateStreamAsync(SuhAiderRequest request, StreamCallback callback) {
+        return CompletableFuture.runAsync(() -> generateStream(request, callback));
+    }
+
+    /**
+     * 간편 비동기 스트리밍 메서드
+     *
+     * @param model 모델명 (예: "llama2", "mistral")
+     * @param prompt 프롬프트 텍스트
+     * @param callback 스트리밍 콜백
+     * @return CompletableFuture (완료 시점 추적용)
+     */
+    public CompletableFuture<Void> generateStreamAsync(String model, String prompt, StreamCallback callback) {
+        return CompletableFuture.runAsync(() -> generateStream(model, prompt, callback));
+    }
+
+    /**
      * HTTP 에러 코드에 따른 예외 처리
      */
     private void handleHttpError(int statusCode, String responseBody) {
@@ -311,6 +533,33 @@ public class SuhAiderEngine {
                 throw new SuhAiderException(SuhAiderErrorCode.INVALID_RESPONSE,
                         "HTTP " + statusCode + ": " + responseBody);
         }
+    }
+
+    /**
+     * HTTP 에러를 콜백으로 전달 (스트리밍용)
+     */
+    private void handleHttpErrorForCallback(int statusCode, String responseBody, StreamCallback callback) {
+        SuhAiderException exception;
+        switch (statusCode) {
+            case 401:
+                exception = new SuhAiderException(SuhAiderErrorCode.UNAUTHORIZED);
+                break;
+            case 403:
+                exception = new SuhAiderException(SuhAiderErrorCode.FORBIDDEN);
+                break;
+            case 404:
+                exception = new SuhAiderException(SuhAiderErrorCode.MODEL_NOT_FOUND, responseBody);
+                break;
+            case 500:
+            case 502:
+            case 503:
+                exception = new SuhAiderException(SuhAiderErrorCode.SERVER_ERROR, responseBody);
+                break;
+            default:
+                exception = new SuhAiderException(SuhAiderErrorCode.INVALID_RESPONSE,
+                        "HTTP " + statusCode + ": " + responseBody);
+        }
+        callback.onError(exception);
     }
 
     /**
